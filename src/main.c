@@ -12,12 +12,9 @@
 
 #include "camera.h"
 #include "error.h"
-#include "input.h"
 #include "shader.h"
 #include "mesh.h"
 
-
-#include <unistd.h>
 
 struct renderer {
     mesh scene;
@@ -132,7 +129,7 @@ mrerror export_png(char *filename)
 
 void render_frame(struct application app)
 {
-    glClearColor(0.5, 0.1, 0.4, 1.0);
+    glClearColor(0.5, 0.1, 0.4, 0.0);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     camera_update(app.w, app.h, app.rend.s, app.rend.cam);
@@ -157,12 +154,11 @@ void app_main(struct application app)
             render_frame(app);
 
             char filename[64];
-            snprintf(filename, 64, "%s/tank_%d_%d.png", app.images_path, x, y);
+            snprintf(filename, 64, "%s/%d_%d.png", app.images_path, x, y);
             export_png(filename);
 
         }
     }
-    printf("\n");
     //}
 }
 

@@ -1,7 +1,6 @@
 #include "camera.h"
 
 #include <glad/glad.h>
-#include <GLFW/glfw3.h>
 
 void camera_update(int w, int h, shader s, camera cam)
 {
