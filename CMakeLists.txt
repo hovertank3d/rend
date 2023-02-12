@@ -4,12 +4,8 @@ project(model_renderer C)
 
 set(MODEL_RENDERER_SOURCES
     "src/main.c"
-    "src/input.c"
-    "src/font.c"
     "src/error.c"
-    "src/image.c"
     "src/mesh.c"
-    "src/object.c"
     "src/shader.c"
     "src/texture.c"
     "src/camera.c"
@@ -39,6 +35,13 @@ set(DEPS_INCLUDES
     "deps/obj"
 )
 
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET
+    libavcodec
+    libavutil
+    libswscale
+)
+
 add_executable(mr ${ALL_SOURCES})
-target_link_libraries(mr PUBLIC glfw EGL m)
+target_link_libraries(mr PUBLIC EGL m PkgConfig::LIBAV)
 target_include_directories(mr PUBLIC ${DEPS_INCLUDES})

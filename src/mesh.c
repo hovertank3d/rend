@@ -8,6 +8,8 @@
 #include "shader.h"
 #include "texture.h"
 #include "camera.h"
+
+#define CONF_NO_GL
 #include "obj.h"
 
 vertex square_vertices[] = {
@@ -198,7 +200,7 @@ void mesh_render(mesh m, shader s, struct mat4 model)
     glBindTexture(GL_TEXTURE_2D, m.texture);
     
     glUseProgram(s);
-    glBindVertexArray(m.VAO); // seeing as we only have a single VAO there's no need to bind it every time, but we'll do so to keep things a bit more organized
+    glBindVertexArray(m.VAO); 
     glDrawElements(GL_TRIANGLES, m.idx_num, GL_UNSIGNED_INT, 0);
 
     m_temp = m.nested;
