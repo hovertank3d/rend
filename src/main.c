@@ -1,9 +1,9 @@
-
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <dirent.h>
 
 #include <glad/glad.h>
 #include <glad/glad_egl.h>
@@ -21,10 +21,11 @@
 #include "camera.h"
 #include "error.h"
 #include "shader.h"
+#include "texture.h"
 #include "mesh.h"
 
 struct video_instance {
-    AVCodec        *codec;
+    const AVCodec        *codec;
     AVCodecContext *c;
     FILE           *f;
     AVFrame        *frame;
@@ -34,13 +35,16 @@ struct video_instance {
 
 struct renderer {
     mesh scene;
+    mesh background_quad;
     shader s;
+    shader bg;
     camera cam;
 };
 
 struct application {
     int distance;
     char texture_path[64];
+    char background_images_path[64];
     char model_path[64];
     char video_path[64];
     int w, h;
@@ -49,6 +53,9 @@ struct application {
 
     int framerate;
     struct video_instance vid;
+
+    int bg_count; 
+    texture *backgrounds;
 
     struct renderer rend;
 };
@@ -64,6 +71,58 @@ static const EGLint configAttribs[] = {
     EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
     EGL_NONE
 };
+
+int is_image(const char *filename)
+{
+    const char *ext = strrchr(filename, '.');
+    if (ext != NULL)
+    {
+        if (strcasecmp(ext, ".bmp") == 0 ||
+            strcasecmp(ext, ".jpg") == 0 ||
+            strcasecmp(ext, ".jpeg") == 0 ||
+            strcasecmp(ext, ".png") == 0 ||
+            strcasecmp(ext, ".tga") == 0)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+mrerror load_background_textures(const char *dir, int *count, texture **textures)
+{
+    char pathbuf[128];
+    mrerror err;
+
+    *count = 0;
+    *textures = NULL;
+
+    DIR *dirp = opendir(dir);
+    if (dirp == NULL) {
+        return mrerror_new("opendir");
+    }
+
+    struct dirent *entry;
+    while ((entry = readdir(dirp)) != NULL) {
+        if (entry->d_type == DT_REG && is_image(entry->d_name)) {
+            snprintf(pathbuf, 128, "%s/%s", dir, entry->d_name);
+
+            *textures = (texture *)realloc(*textures, (*count + 1) * sizeof(texture));
+
+            err = texture_find(&((*textures)[*count]), pathbuf);
+            if (err.err) {
+                free(*textures);
+                closedir(dirp);
+                return err;
+            }
+            (*count)++;
+        }
+    }
+
+    closedir(dirp);
+
+    return nilerr();
+}
 
 mrerror initEGL(struct application *app)
 {
@@ -113,6 +172,9 @@ mrerror initGL(struct application *app)
     app->rend.scene = mesh_load_obj(app->model_path, app->texture_path);
     shader_new(&app->rend.s, "assets/vert.glsl", "assets/frag.glsl");
 
+    app->rend.background_quad = mesh_new_quad();
+    shader_new(&app->rend.bg, "assets/bg_vert.glsl", "assets/bg_frag.glsl");
+
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_MULTISAMPLE);  
     glEnable(GL_CULL_FACE);  
@@ -135,7 +197,7 @@ mrerror init_encode(struct application *app)
     AVFrame *frame;
     AVPacket *pkt;
     uint8_t endcode[] = { 0, 0, 1, 0xb7 };
-    char *filename[64];
+    char filename[64];
 
     codec = avcodec_find_encoder_by_name("libx264");
     if (!codec) {
@@ -157,10 +219,13 @@ mrerror init_encode(struct application *app)
     c->height = app->h;
     /* frames per second */
     c->time_base = (AVRational){1, 25};
-    c->framerate = (AVRational){app->framerate, 1};
-    c->gop_size = 10;
+    c->framerate = (AVRational){1, 1};
+    c->gop_size = 0;
     c->max_b_frames = 1;
     c->pix_fmt = AV_PIX_FMT_YUV420P;
+
+    //lossless
+    av_opt_set(c->priv_data, "crf", "0", 0);
 
     ret = avcodec_open2(c, codec, NULL);
     if (ret < 0) {
@@ -202,8 +267,6 @@ mrerror ffmpeg_encode(AVCodecContext *enc_ctx, AVFrame *frame, AVPacket *pkt,
 {
     int ret;
 
-    /* send the frame to the encoder */
-    
     ret = avcodec_send_frame(enc_ctx, frame);
     if (ret < 0) {
         return mrerror_new("Error sending a frame for encoding\n");
@@ -211,10 +274,11 @@ mrerror ffmpeg_encode(AVCodecContext *enc_ctx, AVFrame *frame, AVPacket *pkt,
 
     while (ret >= 0) {
         ret = avcodec_receive_packet(enc_ctx, pkt);
-        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-            return;
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+            return mrerror_new("Error durning encoding\n");
+        }
         else if (ret < 0) {
-        return mrerror_new("Error durning encoding\n");
+            return mrerror_new("Error durning encoding\n");
         }
 
         fwrite(pkt->data, 1, pkt->size, outfile);
@@ -266,7 +330,7 @@ mrerror add_frame(struct video_instance *vid)
         AV_PIX_FMT_YUV420P,
         SWS_BILINEAR, NULL, NULL, NULL);
     
-    sws_scale(sws_ctx, rgb24, rgb24_stride,
+    sws_scale(sws_ctx, (const unsigned char*const*)rgb24, rgb24_stride,
               0, vid->c->height, vid->frame->data,
               vid->frame->linesize);
 
@@ -283,13 +347,19 @@ mrerror add_frame(struct video_instance *vid)
 
 void render_frame(struct application app)
 {
-    glClearColor(1, 1, 1, 0.0);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glClearColor(0.5, 0.1, 0.4, 1.0);
+    glClear(GL_COLOR_BUFFER_BIT);
 
     camera_update(app.w, app.h, app.rend.s, app.rend.cam);
 
+    app.rend.background_quad.texture = app.backgrounds[rand()%app.bg_count];
+
+    mesh_render_quad(app.rend.background_quad, app.rend.bg);
+
+    glClear(GL_DEPTH_BUFFER_BIT);
+    
     struct mat4 temp; // todo: move it to better place
-    mat4_identity(&temp);
+    mat4_identity((mfloat_t *)&temp);
     mesh_render(app.rend.scene, app.rend.s, temp);
         
 }
@@ -311,6 +381,8 @@ void app_main(struct application app)
     }
     printf("\n");
     
+
+
     ffmpeg_encode(app.vid.c, NULL, app.vid.pkt, app.vid.f);
 
     if (app.vid.codec->id == AV_CODEC_ID_MPEG1VIDEO ||
@@ -354,7 +426,7 @@ int main(int argc, char **argv)
     // put ':' in the starting of the
     // string so that program can 
     //distinguish between '?' and ':' 
-    while((opt = getopt(argc, argv, "m:t:d:p:w:h:a:r:f:")) != -1) 
+    while((opt = getopt(argc, argv, "m:t:d:p:w:h:a:r:f:b:")) != -1) 
     { 
         switch(opt) 
         {
@@ -392,16 +464,22 @@ int main(int argc, char **argv)
             case 'a':
                 sscanf(optarg, "%dx%d %dx%d", &app.ys, &app.ye, &app.ps, &app.pe);
                 break;
+            //background images directory
+            case 'b':
+                strncpy(app.background_images_path, optarg, 64);
+                break;
 
         } 
-    } 
+    }
 
-    if (!app.model_path[0] ||
-        !app.texture_path[0]) {
-        
-        printf("select model and path\n");
+    if (!app.model_path[0]   ||
+        !app.texture_path[0] ||
+        !app.background_images_path[0])
+    {
+
+        printf("select model, backgrund images dir and output path\n");
         return 0;
-    } 
+    }
 
     err = initEGL(&app);
     if (err.err) {
@@ -421,7 +499,9 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    load_background_textures(app.background_images_path, &app.bg_count, &app.backgrounds);
     app.vid.frames_num = (abs(app.ye - app.ys)/3 + 1)*(abs(app.pe - app.ps)/3 + 1);
+
 
     app_main(app);
     vid_to_container(app);

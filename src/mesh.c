@@ -12,38 +12,6 @@
 #define CONF_NO_GL
 #include "obj.h"
 
-vertex square_vertices[] = {
-    {{ 0.5,  0.5, -0.5}, {1.0, 1.0}},
-    {{ 0.5, -0.5, -0.5}, {1.0, 0.0}},
-    {{-0.5, -0.5, -0.5}, {0.0, 0.0}},
-    {{-0.5,  0.5, -0.5}, {0.0, 1.0}},
-
-    {{ 0.5,  0.5, 0.5}, {1.0, 1.0}},
-    {{ 0.5, -0.5, 0.5}, {1.0, 0.0}},
-    {{-0.5, -0.5, 0.5}, {0.0, 0.0}},
-    {{-0.5,  0.5, 0.5}, {0.0, 1.0}}
-};
-
-uint32_t square_indices[] = {
-    0, 1, 2,
-    2, 3, 0,
-    // right
-    1, 5, 6,
-    6, 2, 1,
-    // back
-    7, 6, 5,
-    5, 4, 7,
-    // left
-    4, 0, 3,
-    3, 7, 4,
-    // bottom
-    4, 5, 1,
-    1, 0, 4,
-    // top
-    3, 2, 6,
-    6, 7, 3
-};
-
 void mesh_init(mesh *m)
 {
     glGenVertexArrays(1, &m->VAO);
@@ -71,21 +39,37 @@ void mesh_init(mesh *m)
     glBindVertexArray(0); 
 }
 
-mesh mesh_new_cube(const char *tex)
+mesh mesh_new_quad()
 {
-    mesh cube;
+    mesh quad = {0};
 
-    cube.indices = square_indices;
-    cube.vertices = square_vertices;
-    cube.idx_num = 36;
-    cube.vert_num = 8;
+    float vertices[] = {
+        -1.0f,  1.0f,  
+        -1.0f, -1.0f,  
+         1.0f, -1.0f,  
+        -1.0f,  1.0f,  
+         1.0f, -1.0f,  
+         1.0f,  1.0f, 
+    };
 
-    mesh_init(&cube);
-    if (texture_find(&cube.texture, tex).err) {
-        printf("Can't load texture, skipping\n");
-    }
+    glGenVertexArrays(1, &quad.VAO);
+    glGenBuffers(1, &quad.VBO);
 
-    return cube;
+    glBindVertexArray(quad.VAO);
+    
+    glBindBuffer(GL_ARRAY_BUFFER, quad.VBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), 0);
+    glEnableVertexAttribArray(0);  
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0); 
+
+    glBindVertexArray(0); 
+
+    quad.vert_num = 6;
+
+    return quad;
 }
 
 void mesh_init_push(mesh **head, int vbo, uint32_t *indices, int indices_num, char *tex)
@@ -113,6 +97,7 @@ void mesh_init_push(mesh **head, int vbo, uint32_t *indices, int indices_num, ch
     last->rotation[0] = 0;
     last->rotation[1] = 0;
     last->rotation[2] = 0;
+    last->transform = 1;
 
 
     if (texture_find(&last->texture, tex).err) {
@@ -155,19 +140,16 @@ mesh mesh_load_obj(const char *file, const char *tex)
     surf_num = obj_num_surf(o);
     verts_num = obj_num_vert(o);
 
-    vertices = malloc(verts_num * sizeof(vertex));
+    vertices = calloc(verts_num, sizeof(vertex));
     for (int i = 0; i < verts_num; i++) {
         obj_get_vert_v(o, i, (float *)&vertices[i].position);
         obj_get_vert_n(o, i, (float *)&vertices[i].normal);
         obj_get_vert_t(o, i, (float *)&vertices[i].texture);
-        printf("\rloading mesh:\t%d%%", (100*i)/verts_num);
     }
-    printf("\n");
 
     glGenBuffers(1, &vbo);
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, verts_num*sizeof(vertex), vertices, GL_STATIC_DRAW);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBufferData(GL_ARRAY_BUFFER, verts_num * sizeof(vertex), vertices, GL_STATIC_DRAW);
     
     free(vertices);
 
@@ -177,7 +159,6 @@ mesh mesh_load_obj(const char *file, const char *tex)
         int idx_index = 0;
 
         indices_num = obj_num_poly(o, i)*3;
-
         indices = malloc(indices_num * sizeof(uint32_t));
 
         for (int j = 0; j < indices_num/3; j++) {
@@ -185,7 +166,11 @@ mesh mesh_load_obj(const char *file, const char *tex)
             idx_index += 3;
         }
         mesh_init_push(&root.nested, vbo, indices, indices_num, tex);
+
+        free(indices);
     }
+
+    obj_delete(o);
 
     return root;
 }
@@ -193,8 +178,9 @@ mesh mesh_load_obj(const char *file, const char *tex)
 void mesh_render(mesh m, shader s, struct mat4 model)
 {
     struct mat4 parent_model;
-    parent_model = camera_transform_mesh(s, m, model);
     mesh *m_temp;
+
+    parent_model = camera_transform_mesh(s, m, model);
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, m.texture);
@@ -209,4 +195,15 @@ void mesh_render(mesh m, shader s, struct mat4 model)
         mesh_render(*m_temp, s, parent_model);
         m_temp = m_temp->next;
     } 
+}
+
+void mesh_render_quad(mesh m, shader s)
+{
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m.texture);
+
+    glUseProgram(s);
+
+    glBindVertexArray(m.VAO);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
 }
