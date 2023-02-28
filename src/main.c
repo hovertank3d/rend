@@ -51,6 +51,8 @@ struct application {
     int ps, pe; //pitch start and end
     int ys, ye; 
 
+    int thermal;
+
     int framerate;
     struct video_instance vid;
 
@@ -168,12 +170,11 @@ mrerror initGL(struct application *app)
     }
 
     glViewport(0, 0, app->w, app->h);
-
     app->rend.scene = mesh_load_obj(app->model_path, app->texture_path);
-    shader_new(&app->rend.s, "assets/vert.glsl", "assets/frag.glsl");
+    shader_new(&app->rend.s, "assets/vert.glsl", app->thermal ? "assets/thermal_frag.glsl" : "assets/frag.glsl");
 
     app->rend.background_quad = mesh_new_quad();
-    shader_new(&app->rend.bg, "assets/bg_vert.glsl", "assets/bg_frag.glsl");
+    shader_new(&app->rend.bg, "assets/bg_vert.glsl", app->thermal ? "assets/bg_thermal_frag.glsl" : "assets/bg_frag.glsl");
 
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_MULTISAMPLE);  
@@ -334,8 +335,6 @@ mrerror add_frame(struct video_instance *vid)
               0, vid->c->height, vid->frame->data,
               vid->frame->linesize);
 
-    free(prgb24);
-
     vid->frame->pts++;
 
     /* encode the image */
@@ -421,12 +420,14 @@ int main(int argc, char **argv)
     app.ps = -45;
     app.pe = 45;
 
+    app.thermal = 0;
+
     int opt;
       
     // put ':' in the starting of the
     // string so that program can 
     //distinguish between '?' and ':' 
-    while((opt = getopt(argc, argv, "m:t:d:p:w:h:a:r:f:b:")) != -1) 
+    while((opt = getopt(argc, argv, "m:t:d:p:w:h:a:r:f:b:l")) != -1) 
     { 
         switch(opt) 
         {
@@ -467,6 +468,10 @@ int main(int argc, char **argv)
             //background images directory
             case 'b':
                 strncpy(app.background_images_path, optarg, 64);
+                break;
+            // thermaL
+            case 'l':
+                app.thermal = 1;
                 break;
 
         } 
