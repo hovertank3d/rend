@@ -28,7 +28,7 @@ mrerror shader_compile(uint32_t *s, int type, const char *file)
     shader_source[file_stat.st_size] = 0;
 
     *s = glCreateShader(type);
-    glShaderSource(*s, 1, &shader_source, NULL);
+    glShaderSource(*s, 1, (const GLchar *const *)&shader_source, NULL);
     glCompileShader(*s);
 
     free(shader_source);

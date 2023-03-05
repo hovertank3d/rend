@@ -2,7 +2,6 @@
 
 out vec4 FragColor;
 
-in vec4 gl_FragCoord;
 in vec2 texPos;
 
 uniform sampler2D tex;

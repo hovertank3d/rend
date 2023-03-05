@@ -1,22 +1,18 @@
 #include <stdlib.h>
+#include <limits.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <dirent.h>
-
+#include <time.h>
 #include <glad/glad.h>
 #include <glad/glad_egl.h>
 
+#include <GLFW/glfw3.h>
+
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
-
-#include <libavcodec/avcodec.h>
-
-#include <libavutil/opt.h>
-#include <libavutil/imgutils.h>
-
-#include <libswscale/swscale.h>
 
 #include "camera.h"
 #include "error.h"
@@ -24,14 +20,7 @@
 #include "texture.h"
 #include "mesh.h"
 
-struct video_instance {
-    const AVCodec        *codec;
-    AVCodecContext *c;
-    FILE           *f;
-    AVFrame        *frame;
-    AVPacket       *pkt;
-    int             frames_num;
-};
+#include <cglm/cglm.h>
 
 struct renderer {
     mesh scene;
@@ -42,37 +31,29 @@ struct renderer {
 };
 
 struct application {
+    const char name[64];
     int distance;
     char texture_path[64];
     char background_images_path[64];
     char model_path[64];
-    char video_path[64];
+    char frames_path[64];
+    char annotations_path[64];
+    char imagesets_path[64];
+    char working_dir[64];
     int w, h;
     int ps, pe; //pitch start and end
     int ys, ye; 
 
     int thermal;
 
-    int framerate;
-    struct video_instance vid;
-
     int bg_count; 
     texture *backgrounds;
+
+    GLFWwindow *wnd;
 
     struct renderer rend;
 };
 
-static const EGLint configAttribs[] = {
-    EGL_RED_SIZE, 8,
-    EGL_GREEN_SIZE, 8,
-    EGL_BLUE_SIZE, 8,
-    EGL_ALPHA_SIZE, 8,
-    EGL_DEPTH_SIZE, 8,
-    EGL_SAMPLES, 4,
-    EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
-    EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
-    EGL_NONE
-};
 
 int is_image(const char *filename)
 {
@@ -126,60 +107,55 @@ mrerror load_background_textures(const char *dir, int *count, texture **textures
     return nilerr();
 }
 
-mrerror initEGL(struct application *app)
+mrerror initGLFW(struct application *app)
 {
-    EGLint pbufferAttribs[] = {
-        EGL_WIDTH,  app->w,
-        EGL_HEIGHT, app->h,
-        EGL_NONE,
-    };
-
-    if (!gladLoadEGL()) {
-        return mrerror_new("Can't init EGL");
+    glfwInit();
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_RESIZABLE, GL_FALSE);
+    GLFWwindow *window = glfwCreateWindow(app->w, app->h, "mr", NULL, NULL);
+    if (window == NULL)
+    {
+        glfwTerminate();
+        return mrerror_new("glfwCreateWindow");
     }
+    glfwMakeContextCurrent(window);
+    glfwSwapInterval(0);
 
-    EGLDisplay eglDpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-
-    EGLint major, minor;
-
-    eglInitialize(eglDpy, &major, &minor);
-
-    EGLint numConfigs;
-    EGLConfig eglCfg;
-
-    eglBindAPI(EGL_OPENGL_API);
-
-    eglChooseConfig(eglDpy, configAttribs, &eglCfg, 1, &numConfigs);
-
-    EGLSurface eglSurf = eglCreatePbufferSurface(eglDpy, eglCfg,
-                                                 pbufferAttribs);
-
-
-    EGLContext eglCtx = eglCreateContext(eglDpy, eglCfg, EGL_NO_CONTEXT, 
-                                       NULL);
-
-    eglMakeCurrent(eglDpy, eglSurf, eglSurf, eglCtx);
-
+    app->wnd = window;
     return nilerr();
+}
+
+void debug_callback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar *message, const void *userParam) {
+    fprintf(stderr, "OpenGL Debug Message: %s\n", message);
 }
 
 mrerror initGL(struct application *app)
 {   
-    if (!gladLoadGLLoader((GLADloadproc)eglGetProcAddress)) {
+    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
         return mrerror_new("Can't init GL");
     }
 
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+
+    glEnable(GL_MULTISAMPLE);  
+    glEnable(GL_CULL_FACE); 
+    
+    glEnable(GL_DEBUG_OUTPUT);
+    glDebugMessageCallback((GLDEBUGPROC)debug_callback, 0);
+
+    glClearColor(0.5, 0.1, 0.4, 1.0);
+
     glViewport(0, 0, app->w, app->h);
     app->rend.scene = mesh_load_obj(app->model_path, app->texture_path);
+    app->rend.scene.rotation[0] = glm_rad(90.0f); 
     shader_new(&app->rend.s, "assets/vert.glsl", app->thermal ? "assets/thermal_frag.glsl" : "assets/frag.glsl");
 
     app->rend.background_quad = mesh_new_quad();
     shader_new(&app->rend.bg, "assets/bg_vert.glsl", app->thermal ? "assets/bg_thermal_frag.glsl" : "assets/bg_frag.glsl");
 
-    glEnable(GL_DEPTH_TEST);
-    glEnable(GL_MULTISAMPLE);  
-    glEnable(GL_CULL_FACE);  
-    
     app->rend.cam = (camera){
         {0, app->distance, 0},
         {0, 0, 0},
@@ -189,113 +165,63 @@ mrerror initGL(struct application *app)
     return nilerr();
 }
 
-mrerror init_encode(struct application *app)
+#define SPOS(w, x) ((w/2.0)*(1 + x))
+
+const char annotation_head[] = "<annotation><folder>%s</folder><filename>%s</filename><path>%s</path><source><database>Unknown</database></source><size><width>%d</width><height>%d</height><depth>3</depth></size><segmented>0</segmented>";
+const char annotation_object[] = "<object><name>%s</name><pose>Unspecified</pose><truncated>0</truncated><difficult>0</difficult><bndbox><xmin>%d</xmin><ymin>%d</ymin><xmax>%d</xmax><ymax>%d</ymax></bndbox></object>";
+const char annotation_tail[] = "</annotation>";
+
+void export_annotation(const char *filename, const char *imagefile, struct application app, mesh m, mat4 model, mat4 view, mat4 proj)
 {
-    const AVCodec *codec;
-    AVCodecContext *c= NULL;
-    int i, ret, x, y;
-    FILE *f;
-    AVFrame *frame;
-    AVPacket *pkt;
-    uint8_t endcode[] = { 0, 0, 1, 0xb7 };
-    char filename[64];
+    mat4 mvp;
+    float min[2], max[2], temp;
 
-    codec = avcodec_find_encoder_by_name("libx264");
-    if (!codec) {
-        return mrerror_new("Codec 'libx264' not found");
-    }
-    c = avcodec_alloc_context3(codec);
-    if (!c) {
-        return mrerror_new("Could not allocate video codec context");
-    }
-    pkt = av_packet_alloc();
-    if (!pkt) {
-        return mrerror_new("Could not allocate packet");
-    }
+    min[0] = min[1] = FLT_MAX;
+    max[0] = max[1] = -FLT_MAX;
 
-    /* put sample parameters */
-    c->bit_rate = 400000;
-    /* resolution must be a multiple of two */
-    c->width = app->w;
-    c->height = app->h;
-    /* frames per second */
-    c->time_base = (AVRational){1, 25};
-    c->framerate = (AVRational){1, 1};
-    c->gop_size = 0;
-    c->max_b_frames = 1;
-    c->pix_fmt = AV_PIX_FMT_YUV420P;
+    glm_mat4_mul(proj, view, mvp);
+    glm_mat4_mul(mvp, model, mvp);
 
-    //lossless
-    av_opt_set(c->priv_data, "crf", "0", 0);
+    for (int i = 0; i < 8; i++) {
+        vec4 vert, result;
+        vec2 screen;
 
-    ret = avcodec_open2(c, codec, NULL);
-    if (ret < 0) {
-        return mrerror_new(av_err2str(ret));
+        vert[0] = m.bound_box[i*4];
+        vert[1] = m.bound_box[i*4+1];
+        vert[2] = m.bound_box[i*4+2];
+        vert[3] = m.bound_box[i*4+3];
+
+
+        glm_mat4_mulv(mvp, vert, result);
+        screen[0] = result[0] / (result[3]*1.06);
+        screen[1] = result[1] / (result[3]*1.06);
+
+        min[0] = min[0] < screen[0] ? min[0] : screen[0];
+        min[1] = min[1] < screen[1] ? min[1] : screen[1];
+        max[0] = max[0] > screen[0] ? max[0] : screen[0];
+        max[1] = max[1] > screen[1] ? max[1] : screen[1];
     }
 
-    snprintf(filename, 64, "/tmp/%lu.raw", getpid());
-    f = fopen(filename, "wb");
+    FILE *f = fopen(filename, "w");
+    if (f == NULL) {
+        return;
+    }    
 
-    if (!f) {
-        return mrerror_new("Could not open file\n");
-    }
-    frame = av_frame_alloc();
-    if (!frame) {
-        return mrerror_new("Could not allocate video frame\n");
-    }
-    frame->format = c->pix_fmt;
-    frame->width  = c->width;
-    frame->height = c->height;
-    frame->pts = 0;
+    int xmin, xmax, ymin, ymax;
+    xmin = (int)(SPOS(app.w, min[0]));
+    xmax = (int)(SPOS(app.w, max[0]));
+    ymin = (int)(SPOS(app.h, min[1]));
+    ymax = (int)(SPOS(app.h, max[1]));
 
-    ret = av_frame_get_buffer(frame, 0);
-    if (ret < 0) {
-        return mrerror_new("Could not allocate the video frame data\n");
-    }
-
-
-    app->vid.c = c;
-    app->vid.codec = codec;
-    app->vid.f = f;
-    app->vid.frame = frame;
-    app->vid.pkt = pkt;
-
-    return nilerr();
+    fprintf(f, annotation_head, strrchr(app.frames_path, '/') + 1, strrchr(imagefile, '/') + 1, realpath(imagefile, NULL), app.w, app.h);
+    fprintf(f, annotation_object, app.name, xmin, ymin, xmax, ymax);
+    fprintf(f, annotation_tail);
+    fclose(f);
 }
 
-mrerror ffmpeg_encode(AVCodecContext *enc_ctx, AVFrame *frame, AVPacket *pkt,
-                   FILE *outfile)
-{
-    int ret;
-
-    ret = avcodec_send_frame(enc_ctx, frame);
-    if (ret < 0) {
-        return mrerror_new("Error sending a frame for encoding\n");
-    }
-
-    while (ret >= 0) {
-        ret = avcodec_receive_packet(enc_ctx, pkt);
-        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-            return mrerror_new("Error durning encoding\n");
-        }
-        else if (ret < 0) {
-            return mrerror_new("Error durning encoding\n");
-        }
-
-        fwrite(pkt->data, 1, pkt->size, outfile);
-        av_packet_unref(pkt);
-    }
-}
-
-mrerror add_frame(struct video_instance *vid)
+mrerror export_png(char *filename)
 {
     uint32_t viewport[4];
-    int ret;
-    struct SwsContext *sws_ctx; // for rgb-yuv conversion
-    uint8_t *prgb24;
-    uint8_t *rgb24[1];
-    int rgb24_stride[1];
-
 	glGetIntegerv(GL_VIEWPORT, viewport);
 
 	int x = viewport[0];
@@ -303,7 +229,7 @@ mrerror add_frame(struct video_instance *vid)
 	int width = viewport[2];
 	int height = viewport[3];
 
-    char *data = (char*) malloc((size_t) (width * height * 3));
+    char *data = (char*) calloc(1, (size_t) (width * height * 3));
 
 	if (!data)
 		return mrerror_new("malloc error");
@@ -311,94 +237,132 @@ mrerror add_frame(struct video_instance *vid)
 	glPixelStorei(GL_PACK_ALIGNMENT, 1);
 	glReadPixels(x, y, width, height, GL_RGB, GL_UNSIGNED_BYTE, data);
 
-    printf("rendering: \t%d%%\r", (vid->frame->pts * 100)/vid->frames_num);
-    fflush(stdout);
-
-    ret = av_frame_make_writable(vid->frame);
-    if (ret < 0)
-        exit(1);
-    
-    rgb24[0] = data;
-    rgb24_stride[0] = 3 * vid->c->width;
-    
-    // Convert from RGB to YUV
-    sws_ctx = sws_getContext(
-        vid->c->width,
-        vid->c->height,
-        AV_PIX_FMT_RGB24,
-        vid->c->width,
-        vid->c->height,
-        AV_PIX_FMT_YUV420P,
-        SWS_BILINEAR, NULL, NULL, NULL);
-    
-    sws_scale(sws_ctx, (const unsigned char*const*)rgb24, rgb24_stride,
-              0, vid->c->height, vid->frame->data,
-              vid->frame->linesize);
-
-    vid->frame->pts++;
-
-    /* encode the image */
-    ffmpeg_encode(vid->c, vid->frame, vid->pkt, vid->f);
+    stbi_write_png(filename, width, height, 3, data, 0);
 
     free(data);
+
     return nilerr();
 }
 
 void render_frame(struct application app)
 {
-    glClearColor(0.5, 0.1, 0.4, 1.0);
-    glClear(GL_COLOR_BUFFER_BIT);
+    static int frame_count = 0;
+    frame_count++;
 
-    camera_update(app.w, app.h, app.rend.s, app.rend.cam);
+    char image_filename[256];
+    char annotation_filename[256];
+    mat4 model, view, proj;
+    
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    camera_update(app.w, app.h, app.rend.s, app.rend.cam, view, proj);
+
+    glm_mat4_identity(model);
+    mesh_render(app.rend.scene, app.rend.s, model);
 
     app.rend.background_quad.texture = app.backgrounds[rand()%app.bg_count];
-
     mesh_render_quad(app.rend.background_quad, app.rend.bg);
 
-    glClear(GL_DEPTH_BUFFER_BIT);
-    
-    struct mat4 temp; // todo: move it to better place
-    mat4_identity((mfloat_t *)&temp);
-    mesh_render(app.rend.scene, app.rend.s, temp);
-        
+    // saving result
+
+    snprintf(image_filename, 64, "%s/%d.png", app.frames_path, frame_count);
+    export_png(image_filename);
+    snprintf(annotation_filename, 64, "%s/%d.xml", app.annotations_path, frame_count);
+    export_annotation(annotation_filename, image_filename, app, app.rend.scene, model, view, proj);
+}
+
+static void rmkdir(const char *dir) {
+    char tmp[256];
+    char *p = NULL;
+    size_t len;
+
+    strncpy(tmp, dir, sizeof(tmp));
+    len = strlen(tmp);
+
+    if (tmp[len - 1] == '/')
+        tmp[len - 1] = 0;
+    for (p = tmp + 1; *p; p++)
+        if (*p == '/') {
+            *p = 0;
+            mkdir(tmp, S_IRWXU);
+            *p = '/';
+        }
+    mkdir(tmp, S_IRWXU);
 }
 
 void app_main(struct application app)
 {
-    uint8_t endcode[] = { 0, 0, 1, 0xb7 };
-
-    render_frame(app);
+    char filename[64];
     
-    for (int x = app.ys/3; x <= app.ye/3; x++) {
-        for (int y = app.ps/3; y <= app.pe/3; y++) {
-            app.rend.scene.rotation[0] = to_radians(x*3);
-            app.rend.scene.rotation[1] = to_radians(y*3);
+    int frames_count = 1;
+
+    for (int x = app.ys/5; x <= app.ye/5; x++) {
+        for (int y = app.ps/5; y <= app.pe/5; y++) {
+            if (glfwWindowShouldClose(app.wnd))
+                return;
+
+            app.rend.scene.rotation[0] = glm_rad(x*5);
+            app.rend.scene.rotation[1] = glm_rad(y*5);
+
+            frames_count++;
 
             render_frame(app);
-            add_frame(&app.vid);
+
+            glfwSwapBuffers(app.wnd);
+            glfwPollEvents();  
         }
     }
-    printf("\n");
-    
 
+    frames_count--;
 
-    ffmpeg_encode(app.vid.c, NULL, app.vid.pkt, app.vid.f);
+    unsigned char *picked = calloc(frames_count/8 + 1, 1); // bitset of size 100
+    int *nums = calloc(frames_count, sizeof(int));
 
-    if (app.vid.codec->id == AV_CODEC_ID_MPEG1VIDEO ||
-        app.vid.codec->id == AV_CODEC_ID_MPEG2VIDEO) {
+    int i, j, rand_num;
 
-        fwrite(endcode, 1, sizeof(endcode), app.vid.f);
+    srand(time(NULL)); // initialize the random seed
+    for (i = 0; i < frames_count/8 + 1; i++) {
+        picked[i] = 0;
     }
-    fclose(app.vid.f);
-}
 
-void vid_to_container(struct application app)
-{
-    char command[128];
-    snprintf(command, 128, "ffmpeg -i /tmp/%lu.raw -r %d %s", getpid(), app.framerate, app.video_path);
-    system(command);
-    snprintf(command, 128, "/tmp/%lu.raw", getpid());
-    unlink(command);
+    for (i = 0; i < frames_count; i++) {
+        do {
+            rand_num = rand() % frames_count + 1;
+        } while (picked[rand_num/8] & (1 << rand_num%8)); // check if already picked
+        picked[rand_num/8] |= (1 << rand_num%8); // mark as picked
+        nums[i] = rand_num;
+    }
+
+    FILE *test_iset, *train_iset, *trainval_iset, *val_iset, *labels;
+    snprintf(filename, 64, "%s/test.txt", app.imagesets_path);
+    test_iset = fopen(filename, "w");
+    snprintf(filename, 64, "%s/train.txt", app.imagesets_path);
+    train_iset = fopen(filename, "w");
+    snprintf(filename, 64, "%s/trainval.txt", app.imagesets_path);
+    trainval_iset = fopen(filename, "w");
+    snprintf(filename, 64, "%s/val.txt", app.imagesets_path);
+    val_iset = fopen(filename, "w");
+    snprintf(filename, 64, "%s/labels.txt", app.working_dir);
+    labels = fopen(filename, "w");
+
+    fputs(app.name, labels);
+    fclose(labels);
+
+    for(int j = 0; j < frames_count; j++) {
+        if (j < frames_count/32) {
+            fprintf(test_iset, "%d\n", nums[j]);
+            fprintf(val_iset, "%d\n", nums[j]);
+        }
+        fprintf(train_iset, "%d\n", nums[j]);
+        fprintf(trainval_iset, "%d\n", nums[j]);
+    }
+
+    fclose(test_iset);
+    fclose(train_iset);
+    fclose(trainval_iset);
+    fclose(val_iset);
+
+    printf("\n");
 }
 
 int main(int argc, char **argv)
@@ -409,11 +373,9 @@ int main(int argc, char **argv)
     memset(&app, 0, sizeof(struct application));
 
     app.distance = 13;
-    strncpy(app.video_path, "tank.mp4", 64);
 
     app.w = 512;
     app.h = 512;
-    app.framerate = 1;
 
     app.ys = 0;
     app.ye = 360;
@@ -427,14 +389,10 @@ int main(int argc, char **argv)
     // put ':' in the starting of the
     // string so that program can 
     //distinguish between '?' and ':' 
-    while((opt = getopt(argc, argv, "m:t:d:p:w:h:a:r:f:b:l")) != -1) 
+    while((opt = getopt(argc, argv, "m:t:d:o:w:h:a:b:l:n:")) != -1) 
     { 
         switch(opt) 
         {
-            //framerate
-            case 'f': 
-                app.framerate = atoi(optarg);
-                break;
             //model
             case 'm': 
                 strncpy(app.model_path, optarg, 64);
@@ -444,9 +402,13 @@ int main(int argc, char **argv)
                 strncpy(app.texture_path, optarg, 64);
                 break;
             //path 
-            case 'p': 
-                strncpy(app.video_path, optarg, 64);
+            case 'o': 
+                strncpy(app.working_dir, optarg, 64);
+                snprintf(app.frames_path, 64, "%s/%s", app.working_dir, "JPEGImages");
+                snprintf(app.imagesets_path, 64, "%s/%s", app.working_dir, "ImageSets/Main");
+                snprintf(app.annotations_path, 64, "%s/%s", app.working_dir, "Annotations");
                 break;
+            //annotations(z as zones) 
             //distance 
             case 'd': 
                 app.distance = atoi(optarg);
@@ -454,12 +416,10 @@ int main(int argc, char **argv)
             //width 
             case 'w': 
                 app.w = atoi(optarg);
-                app.w = pow(2, ceil(log(app.w)/log(2)));
                 break;
             //heigth 
             case 'h': 
                 app.h = atoi(optarg);
-                app.h = pow(2, ceil(log(app.h)/log(2)));
                 break; 
             //angles
             case 'a':
@@ -472,6 +432,16 @@ int main(int argc, char **argv)
             // thermaL
             case 'l':
                 app.thermal = 1;
+                break;
+            // name
+            case 'n':
+                strncpy(app.name, optarg, 64);
+                break;
+            case 'z': 
+                strncpy(app.annotations_path, optarg, 64);
+                break;
+            case 'i': 
+                strncpy(app.imagesets_path, optarg, 64);
                 break;
 
         } 
@@ -486,7 +456,11 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    err = initEGL(&app);
+    rmkdir(app.frames_path);
+    rmkdir(app.annotations_path);
+    rmkdir(app.imagesets_path);
+
+    err = initGLFW(&app);
     if (err.err) {
         printf("%s\n", err.msg);
         return 1;
@@ -498,20 +472,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    err = init_encode(&app);
-    if (err.err) {
-        printf("%s\n", err.msg);
-        return 1;
-    }
-
     load_background_textures(app.background_images_path, &app.bg_count, &app.backgrounds);
-    app.vid.frames_num = (abs(app.ye - app.ys)/3 + 1)*(abs(app.pe - app.ps)/3 + 1);
-
 
     app_main(app);
-    vid_to_container(app);
-
-    avcodec_free_context(&app.vid.c);
-    av_frame_free(&app.vid.frame);
-    av_packet_free(&app.vid.pkt);
 }

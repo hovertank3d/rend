@@ -23,7 +23,7 @@ mrerror texture_new(texture *t, const char *file)
     struct texture_entry *temp;
     struct texture_entry *entry;
 
-    uint8_t *data = stbi_load(file, &w, &h, &comp, 3);
+    uint8_t *data = stbi_load(file, &w, &h, &comp, 4);
     if (data == NULL) {
         stbi_image_free(data);
         return mrerror_new(stbi_failure_reason());
@@ -37,7 +37,7 @@ mrerror texture_new(texture *t, const char *file)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, data);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
     glGenerateMipmap(GL_TEXTURE_2D);
 
     stbi_image_free(data);

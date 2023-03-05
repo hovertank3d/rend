@@ -1,19 +1,19 @@
 #ifndef __MESH_H__
 #define __MESH_H__
 
-#include "mathc.h"
+#include <cglm/cglm.h>
 #include "shader.h"
 
 typedef struct vertex {
-    mfloat_t position[VEC3_SIZE];
-    mfloat_t texture[VEC2_SIZE];
-    mfloat_t normal[VEC3_SIZE];
+    vec3 position;
+    vec2 texture;
+    vec3 normal;
 } vertex;
 
 typedef struct mesh {
-    mfloat_t position[VEC3_SIZE];
-    mfloat_t rotation[VEC3_SIZE];
-    mfloat_t scale[VEC3_SIZE];
+    vec3 position;
+    vec3 rotation;
+    vec3 scale;
 
     vertex   *vertices;
     uint32_t *indices;
@@ -25,15 +25,17 @@ typedef struct mesh {
     uint32_t VAO, VBO, EBO;
 
 
+    float bound_box[4*8];
+
     char        *name;
     struct mesh *next;
     struct mesh *nested;
-    int          transform; //is matrix transform neccesarry     
+    int          renderable; 
 } mesh;
 
 mesh mesh_new_quad();
 mesh mesh_load_obj(const char *file, const char *tex);
 
-void mesh_render(mesh m, shader s, struct mat4 model);
+void mesh_render(mesh m, shader s, mat4 model);
 void mesh_render_quad(mesh m, shader s);
 #endif
