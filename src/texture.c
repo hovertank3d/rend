@@ -26,6 +26,7 @@ mrerror texture_new(texture *t, const char *file)
     uint8_t *data = stbi_load(file, &w, &h, &comp, 4);
     if (data == NULL) {
         stbi_image_free(data);
+        printf("KEKEKEKEKEKK LMFAO\n");
         return mrerror_new(stbi_failure_reason());
     }
 

@@ -1,10 +1,17 @@
 #include <stdlib.h>
 #include <limits.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
+#include <getopt.h>
 #include <dirent.h>
+
+#if defined(WIN32) || defined(_WIN32) || defined(__WIN32) && !defined(__CYGWIN__)
+# include <windows.h>
+#else
+# include <sys/stat.h>
+# include <sys/types.h>
+# include <unistd.h>
+#endif
+
 #include <time.h>
 #include <glad/glad.h>
 #include <glad/glad_egl.h>
@@ -22,6 +29,20 @@
 
 #include <cglm/cglm.h>
 
+#define PATHBUF_SIZE 512
+
+#if defined(WIN32) || defined(_WIN32) || defined(__WIN32) && !defined(__CYGWIN__)
+# define realpath_(path, buffer)   \
+    char **lppPart = {NULL};       \
+    GetFullPathName(path, PATHBUF_SIZE, buffer, lppPart);
+
+# define mkdir_p(path) CreateDirectoryA(path, 0)
+#else
+# define realpath_(path, result) realpath(path, result)
+# define mkdir_p(path) mkdir(path, S_IRWXU)
+#endif
+
+
 struct renderer {
     mesh scene;
     mesh background_quad;
@@ -31,15 +52,15 @@ struct renderer {
 };
 
 struct application {
-    const char name[64];
     int distance;
-    char texture_path[64];
-    char background_images_path[64];
-    char model_path[64];
-    char frames_path[64];
-    char annotations_path[64];
-    char imagesets_path[64];
-    char working_dir[64];
+    char texture_path[PATHBUF_SIZE];
+    char background_images_path[PATHBUF_SIZE];
+    char model_path[PATHBUF_SIZE];
+    char frames_path[PATHBUF_SIZE];
+    char annotations_path[PATHBUF_SIZE];
+    char imagesets_path[PATHBUF_SIZE];
+    char working_dir[PATHBUF_SIZE];
+    char name[PATHBUF_SIZE];
     int w, h;
     int ps, pe; //pitch start and end
     int ys, ye; 
@@ -72,6 +93,42 @@ int is_image(const char *filename)
     return 0;
 }
 
+#if defined(WIN32) || defined(_WIN32) || defined(__WIN32) && !defined(__CYGWIN__)
+mrerror load_background_textures(const char *dir, int *count, texture **textures) {
+    char pathbuf[MAX_PATH];
+    mrerror err;
+
+    *count = 0;
+    *textures = NULL;
+
+    WIN32_FIND_DATAA findData;
+    HANDLE hFind = FindFirstFile(dir, &findData);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        return mrerror_new("FindFirstFileA INVALID_HANDLE_VALUE");
+    }
+
+    do {
+        if (!(findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && is_image(findData.cFileName)) {
+
+            *textures = (texture *)realloc(*textures, (*count + 1) * sizeof(texture));
+
+            //realpath_(pathbuf, pathbuf);
+            //puts(pathbuf);
+
+            err = texture_find(&((*textures)[*count]), dir);
+            if (err.err) {
+                free(*textures);
+                FindClose(hFind);
+                return err;
+            }
+            (*count)++;
+        }
+    } while (FindNextFile(hFind, &findData) != 0);
+
+    FindClose(hFind);
+    return nilerr();
+}
+#else
 mrerror load_background_textures(const char *dir, int *count, texture **textures)
 {
     char pathbuf[128];
@@ -106,6 +163,7 @@ mrerror load_background_textures(const char *dir, int *count, texture **textures
 
     return nilerr();
 }
+#endif
 
 mrerror initGLFW(struct application *app)
 {
@@ -213,7 +271,10 @@ void export_annotation(const char *filename, const char *imagefile, struct appli
     ymin = (int)(SPOS(app.h, min[1]));
     ymax = (int)(SPOS(app.h, max[1]));
 
-    fprintf(f, annotation_head, strrchr(app.frames_path, '/') + 1, strrchr(imagefile, '/') + 1, realpath(imagefile, NULL), app.w, app.h);
+    char fullpath[PATHBUF_SIZE];
+    realpath_(imagefile, fullpath);
+
+    fprintf(f, annotation_head, strrchr(app.frames_path, '/') + 1, strrchr(imagefile, '/') + 1, fullpath, app.w, app.h);
     fprintf(f, annotation_object, app.name, xmin, ymin, xmax, ymax);
     fprintf(f, annotation_tail);
     fclose(f);
@@ -249,8 +310,8 @@ void render_frame(struct application app)
     static int frame_count = 0;
     frame_count++;
 
-    char image_filename[256];
-    char annotation_filename[256];
+    char image_filename[PATHBUF_SIZE];
+    char annotation_filename[PATHBUF_SIZE];
     mat4 model, view, proj;
     
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -272,7 +333,7 @@ void render_frame(struct application app)
 }
 
 static void rmkdir(const char *dir) {
-    char tmp[256];
+    char tmp[PATHBUF_SIZE];
     char *p = NULL;
     size_t len;
 
@@ -284,10 +345,10 @@ static void rmkdir(const char *dir) {
     for (p = tmp + 1; *p; p++)
         if (*p == '/') {
             *p = 0;
-            mkdir(tmp, S_IRWXU);
+            mkdir_p(tmp);
             *p = '/';
         }
-    mkdir(tmp, S_IRWXU);
+    mkdir_p(tmp);
 }
 
 void app_main(struct application app)
@@ -313,7 +374,7 @@ void app_main(struct application app)
         }
     }
 
-    frames_count--;
+    frames_count++;
 
     unsigned char *picked = calloc(frames_count/8 + 1, 1); // bitset of size 100
     int *nums = calloc(frames_count, sizeof(int));
@@ -357,12 +418,12 @@ void app_main(struct application app)
         fprintf(trainval_iset, "%d\n", nums[j]);
     }
 
+    free(nums);
+
     fclose(test_iset);
     fclose(train_iset);
     fclose(trainval_iset);
     fclose(val_iset);
-
-    printf("\n");
 }
 
 int main(int argc, char **argv)
@@ -472,7 +533,11 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    load_background_textures(app.background_images_path, &app.bg_count, &app.backgrounds);
+    err = load_background_textures(app.background_images_path, &app.bg_count, &app.backgrounds);
+    if (err.err) {
+        printf("%s\n", err.msg);
+        return 1;
+    }
 
     app_main(app);
 }
